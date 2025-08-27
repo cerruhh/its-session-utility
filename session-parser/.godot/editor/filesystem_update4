@@ -1,7 +1,0 @@
-res://Scenes/main.tscn
-res://menu_bar.gd
-res://Scenes/MessageExplorer/MenuBar.tscn
-res://Scenes/MessageExplorer/MessageLabel.tscn
-res://Scenes/FileManagement/open_dialog.tscn
-res://Scenes/main.gd
-res://Scenes/scroll_container.gd
