@@ -93,18 +93,35 @@ def list_recents():
                 recents.append(name)
     return jsonify(recents)
 
+@app.route("/list_recent_saves")
+def list_recent_saves():
+    # list directories inside SAVE_FOLDER
+    recents = []
+    for name in sorted(os.listdir(SAVE_FOLDER)):
+        path = os.path.join(SAVE_FOLDER, name)
+        if os.path.isdir(path):
+            json_files = [f for f in os.listdir(path) if f.endswith(".json")]
+            db_files = [f for f in os.listdir(path) if f.endswith(".db")]
+            if json_files and "packed_images.db" in db_files:
+                recents.append(name)
+    return jsonify(recents)
+
 
 @app.route("/load_recent", methods=["POST"])
 def load_recent():
     folder = request.json.get("folder")
-    extract_path = os.path.join(EXTRACT_FOLDER, folder)
+    use_save_folder = request.json.get("save_folder", False)  # new flag
+
+    base_folder = SAVE_FOLDER if use_save_folder else EXTRACT_FOLDER
+    extract_path = os.path.join(base_folder, folder)
+
     if not os.path.exists(extract_path):
         return jsonify({"error": "Folder not found"}), 404
 
     json_files = sorted([f for f in os.listdir(extract_path) if f.endswith(".json")])
     db_files = [f for f in os.listdir(extract_path) if f.endswith(".db")]
     if not json_files or "packed_images.db" not in db_files:
-        return jsonify({"error": "Invalid extracted folder"}), 400
+        return jsonify({"error": "Invalid folder"}), 400
 
     session["json_files"] = json_files
     session["extract_path"] = extract_path
@@ -112,6 +129,7 @@ def load_recent():
 
     data = load_chunk(0)
     return jsonify({"message": "Recent loaded", "chunk_index": 0, "data": data})
+
 
 
 @app.route("/navigate", methods=["POST"])

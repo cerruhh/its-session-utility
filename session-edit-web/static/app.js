@@ -11,6 +11,7 @@ let state = {
 
 let markMode = false;
 let markedMessages = new Set();
+let lastClickedIndex = null;
 
 
 const fileInput = document.getElementById('file-input');
@@ -54,94 +55,121 @@ function renderMessage(msg) {
 
 function renderChunk(data){
   clearCanvas();
+  console.log(data)
+
   if(!data || !data.messages){
     setBottomBar('Chunk ' + (state.chunkIndex ?? '-') + ' | messageCount: ' + (data ? (data.messageCount ?? 0) : 0));
     return;
   }
 
   const messages = data.messages;
-  messages.forEach((msg, i) => {
-      const el = document.createElement('div');
-      el.className = 'message';
 
-      // If marked already, highlight it
-      if(msg.marked || markedMessages.has(`${state.chunkIndex}:${i}`)){
-        el.classList.add('marked');
-      }
-
-      const dateEl = document.createElement('div');
-      dateEl.className = 'msg-date';
-      dateEl.textContent = formatDate(msg.timestamp || '');
-
-      const contentEl = document.createElement('div');
-      contentEl.className = 'msg-content';
-
-      const author = document.createElement('div');
-      author.className = 'msg-author';
-      const name = state.showDisplayNames ? (msg.author?.nickname || msg.author?.name) : (msg.author?.name || msg.author?.nickname || '');
-      author.textContent = `${name}:`;
-
-      const text = document.createElement('div');
-      text.className = 'msg-text';
-      text.innerHTML = marked.parse(msg.content || '');
-
-      contentEl.appendChild(author);
-      contentEl.appendChild(text);
-
-      // attachments (unchanged)
-      if(Array.isArray(msg.attachments) && msg.attachments.length>0){
-        const acont = document.createElement('div');
-        acont.className = 'attachment';
-        msg.attachments.forEach(att => {
-          const url = '/attachment/' + encodeURIComponent(att.replace(/^db:\/\//, '')) + '?v=' + state.imagesReloadKey;
-          const img = document.createElement('img');
-          img.style.maxWidth = '300px';
-          img.style.display = 'block';
-          img.style.marginTop = '6px';
-          img.src = url;
-          img.onerror = () => { img.style.display='none' }
-          acont.appendChild(img);
-        })
-        contentEl.appendChild(acont);
-      }
-
-      el.appendChild(dateEl);
-      el.appendChild(contentEl);
-
-      // ✅ Mark/unmark interactions
-        el.addEventListener('click', (ev)=>{
-          if(markMode){
-            const key = `${state.chunkIndex}:${i}`;
-            if(markedMessages.has(key)){
-              markedMessages.delete(key);
-              el.classList.remove('marked');
-            } else {
-              markedMessages.add(key);
-              el.classList.add('marked');
-            }
-            ev.stopPropagation();
-          }
-        });
-
-
-
-      el.addEventListener('contextmenu', (ev)=>{
-        if(markMode){
-          const key = `${state.chunkIndex}:${i}`;
-          markedMessages.delete(key);
-          el.classList.remove('marked');
-          ev.preventDefault();
-        }
+  // initialize markedMessages from JSON
+  markedMessages.clear();
+  messages.forEach((msg, i)=>{
+    if(msg.marked){
+      const key = `${state.chunkIndex}:${i}`;
+      markedMessages.add(key);
+    }
   });
 
-  canvas.appendChild(el);
+  messages.forEach((msg, i) => {
+    const el = document.createElement('div');
+    el.className = 'message';
+
+    // highlight if marked
+    const key = `${state.chunkIndex}:${i}`;
+    if(msg.marked || markedMessages.has(key)){
+      el.classList.add('marked');
+    }
+
+    const dateEl = document.createElement('div');
+    dateEl.className = 'msg-date';
+    dateEl.textContent = formatDate(msg.timestamp || '');
+
+    const contentEl = document.createElement('div');
+    contentEl.className = 'msg-content';
+
+    const author = document.createElement('div');
+    author.className = 'msg-author';
+    const name = state.showDisplayNames ? (msg.author?.nickname || msg.author?.name) : (msg.author?.name || msg.author?.nickname || '');
+    author.textContent = `${name}:`;
+
+    const text = document.createElement('div');
+    text.className = 'msg-text';
+    text.innerHTML = marked.parse(msg.content || '');
+
+    contentEl.appendChild(author);
+    contentEl.appendChild(text);
+
+    // attachments
+    if(Array.isArray(msg.attachments) && msg.attachments.length > 0){
+      const acont = document.createElement('div');
+      acont.className = 'attachment';
+      msg.attachments.forEach(att => {
+        const url = '/attachment/' + encodeURIComponent(att.replace(/^db:\/\//, '')) + '?v=' + state.imagesReloadKey;
+        const img = document.createElement('img');
+        img.style.maxWidth = '300px';
+        img.style.display = 'block';
+        img.style.marginTop = '6px';
+        img.src = url;
+        img.onerror = () => { img.style.display='none'; }
+        acont.appendChild(img);
+      });
+      contentEl.appendChild(acont);
+    }
+
+    el.appendChild(dateEl);
+    el.appendChild(contentEl);
+
+    // ✅ Mark/unmark interactions
+    el.addEventListener('click', (ev)=>{
+      if(markMode){
+        const key = `${state.chunkIndex}:${i}`;
+
+        if(ev.shiftKey && lastClickedIndex !== null){
+          // mark/unmark range
+          const start = Math.min(lastClickedIndex, i);
+          const end = Math.max(lastClickedIndex, i);
+          for(let j = start; j <= end; j++){
+            const k = `${state.chunkIndex}:${j}`;
+            markedMessages.add(k);
+            const msgEl = canvas.children[j];
+            if(msgEl) msgEl.classList.add('marked');
+          }
+        } else {
+          // toggle single message
+          if(markedMessages.has(key)){
+            markedMessages.delete(key);
+            el.classList.remove('marked');
+          } else {
+            markedMessages.add(key);
+            el.classList.add('marked');
+          }
+        }
+
+        lastClickedIndex = i;
+        ev.stopPropagation();
+        updateBottomBar();
+      }
+    });
+
+    el.addEventListener('contextmenu', (ev)=>{
+      if(markMode){
+        const key = `${state.chunkIndex}:${i}`;
+        markedMessages.delete(key);
+        el.classList.remove('marked');
+        ev.preventDefault();
+        updateBottomBar();
+      }
+    });
+
+    canvas.appendChild(el);
+  });
+
   updateBottomBar();
-});
-
-
-
-  setBottomBar('Chunk ' + state.chunkIndex + ' | messageCount: ' + (data.messageCount ?? data.messages.length));
 }
+
 
 function updateBottomBar(){
   let text = 'No file loaded';
@@ -195,10 +223,27 @@ async function reloadChunk(){
 }
 
 async function savePacked(){
-  if(!state.loaded){ alert('No file loaded'); return }
-  // trigger download
-  window.location = '/save_packed';
+  if(!state.loaded){
+    alert('No file loaded');
+    return;
+  }
+
+  const res = await fetch('/save_marked', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({marks: Object.fromEntries([...markedMessages].map(k=>[k,true]))})
+  });
+
+  if(!res.ok){
+    const e = await res.json().catch(()=>({error:'save failed'}));
+    alert(e.error||'Save failed');
+    return;
+  }
+
+  const j = await res.json();
+  alert('Marked messages saved to SAVE_FOLDER.');
 }
+
 
 function reloadImages(){
   // Just bump a cachebust key and rerender to force image reload
@@ -276,6 +321,55 @@ async function loadRecent(folder){
 // refresh submenu when app loads
 refreshRecentMenu();
 
+const menuLoadRecentSave = document.getElementById('menu-load-recent-save');
+
+async function refreshRecentSaveMenu(){
+  const res = await fetch('/list_recent_saves');
+  if(!res.ok) return;
+  const recents = await res.json();
+
+  menuLoadRecentSave.innerHTML = '';
+
+  if(recents.length === 0){
+    const li = document.createElement('div');
+    li.textContent = '(none)';
+    li.className = 'menu-disabled';
+    menuLoadRecentSave.appendChild(li);
+    return;
+  }
+
+  recents.forEach(folder=>{
+    const li = document.createElement('div');
+    li.textContent = folder;
+    li.className = 'menu-item';
+    li.addEventListener('click', ()=> loadRecentSave(folder));
+    menuLoadRecentSave.appendChild(li);
+  });
+}
+
+async function loadRecentSave(folder){
+  const path = folder; // backend will prepend SAVE_FOLDER
+  const res = await fetch('/load_recent', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({folder: path, save_folder:true}) // optional flag
+  });
+
+  if(!res.ok){
+    const e = await res.json().catch(()=>({error:'load recent save failed'}));
+    alert(e.error||'Failed to load save');
+    return;
+  }
+  const j = await res.json();
+  state.loaded = true;
+  state.chunkIndex = j.chunk_index;
+  state.data = j.data;
+  markedMessages.clear();  // reset marks when loading previous save
+  renderChunk(state.data);
+}
+
+// call once on startup
+refreshRecentSaveMenu();
 
 
 // Keyboard shortcuts
