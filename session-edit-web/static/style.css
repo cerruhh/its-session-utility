@@ -1,0 +1,114 @@
+html, body {
+  height: 100%;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  font-family: Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+}
+
+.topbar {
+  height: 40px;
+  background: #222;
+  color: white;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  flex: 0 0 auto;
+}
+
+
+.menu{display:flex;gap:10px}
+.menu-item{position:relative;padding:8px;cursor:default}
+.menu-item:hover{background:#333}
+.dropdown{position:absolute;top:100%;left:0;background:#111;border:1px solid #333;display:none;min-width:220px}
+.menu-item:hover .dropdown{display:block}
+.dropdown-item{padding:8px;color:#ddd;cursor:pointer;display:flex;justify-content:space-between;align-items:center}
+.dropdown-item:hover{background:#222}
+.kbd{font-size:12px;color:#999}
+.canvas {
+  background: #000;
+  color: #fff;
+  flex: 1 1 auto;    /* take remaining space */
+  overflow: auto;
+  padding: 12px;
+}
+.message{display:flex;gap:12px;padding:8px 6px;border-bottom:1px solid rgba(255,255,255,0.02)}
+.msg-date{width:110px;flex:0 0 110px; text-align:left; font-size:12px; color:#bbb}
+.msg-content{flex:1}
+.msg-author{font-weight:600}
+/* Link styles */
+.msg-text a {
+  color: #4aa8ff;       /* light blue */
+  text-decoration: none;
+  transition: color 0.2s ease, text-decoration 0.2s ease;
+}
+
+.msg-text a:hover {
+  color: #1e90ff;       /* a bit deeper blue on hover */
+  text-decoration: underline;
+}
+
+.msg-text a:visited {
+  color: #7aaefc;       /* slightly muted for visited links */
+}
+
+.attachment{margin-top:6px}
+
+.bottombar {
+  height: 40px;
+  background: #111;
+  color: #ddd;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  flex: 0 0 auto;
+}
+
+/* Allow dropdown items to host a flyout submenu */
+.dropdown-item.has-submenu {
+  position: relative;
+  padding-right: 20px; /* space for arrow ▸ */
+}
+
+.dropdown-item.has-submenu::after {
+  content: "▸";
+  position: absolute;
+  right: 8px;
+  color: #999;
+  font-size: 12px;
+}
+
+/* Submenu container */
+.submenu {
+  position: absolute;
+  top: 0;
+  left: 100%; /* open to the right */
+  background: #111;
+  border: 1px solid #333;
+  display: none;
+  min-width: 200px;
+  z-index: 1000;
+}
+
+/* Show submenu when parent is hovered */
+.dropdown-item.has-submenu:hover > .submenu {
+  display: block;
+}
+
+/* Submenu items */
+.submenu .dropdown-item {
+  padding: 8px;
+  color: #ddd;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.submenu .dropdown-item:hover {
+  background: #222;
+}
+
+.message.marked {
+  background-color: rgba(100, 180, 255, 0.2); /* light blue, different from links */
+}

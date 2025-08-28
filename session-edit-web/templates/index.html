@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat Chunk Viewer</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <div id="topbar" class="topbar">
+    <div class="menu">
+      <div class="menu-item">File
+        <div class="dropdown">
+          <div class="dropdown-item" id="menu-load">Load packed <span class="kbd">Ctrl+L</span></div>
+             <div class="dropdown-item has-submenu">
+            Load Recent
+            <div id="menu-load-recent" class="submenu">
+              <!-- JS will populate recent files here -->
+              <div class="dropdown-item">Recent1</div>
+              <div class="dropdown-item">Recent2</div>
+            </div>
+          </div>
+          <div class="dropdown-item" id="menu-save-marked">Save marked<span class="kbd">Ctrl+S</span></div>
+          <div id="menu-export-save" class="dropdown-item">Export Save</div>
+        </div>
+      </div>
+      <div class="menu-item">View
+        <div class="dropdown">
+          <div class="dropdown-item" id="menu-reload-images">Reload images <span class="kbd">Ctrl+Shift+R</span></div>
+          <label class="dropdown-item"><input type="checkbox" id="show-display-names"> Show display names</label>
+        </div>
+      </div>
+      <div class="menu-item">Chunk
+        <div class="dropdown">
+          <div class="dropdown-item" data-action="first">First chunk <span class="kbd">Ctrl+↑</span></div>
+          <div class="dropdown-item" data-action="last">Last chunk <span class="kbd">Ctrl+↓</span></div>
+          <div class="dropdown-item" data-action="forward">Forward chunk <span class="kbd">Ctrl+→</span></div>
+          <div class="dropdown-item" data-action="backward">Backward chunk <span class="kbd">Ctrl+←</span></div>
+          <div class="dropdown-item" data-action="reload">Reload chunk <span class="kbd">Ctrl+R</span></div>
+        </div>
+      </div>
+    </div>
+    <!-- hidden file input -->
+    <input type="file" id="file-input" accept=".zip" style="display:none">
+  </div>
+
+  <div id="canvas" class="canvas"></div>
+
+  <div id="bottombar" class="bottombar">No file loaded</div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
