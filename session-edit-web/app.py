@@ -1,13 +1,12 @@
 import logging
 
-import os
+import os, shutil
 import zipfile
 import io
 import json
 import sqlite3
 # from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, session, abort
-
 
 app = Flask(__name__)
 app.secret_key = "supersecretkey"
@@ -79,6 +78,7 @@ def get_chunk():
         return jsonify({"error": "No file loaded"}), 400
     return jsonify({"chunk_index": idx, "data": data})
 
+
 # Recents
 @app.route("/list_recents")
 def list_recents():
@@ -93,6 +93,7 @@ def list_recents():
                 recents.append(name)
     return jsonify(recents)
 
+
 @app.route("/list_recent_saves")
 def list_recent_saves():
     # list directories inside SAVE_FOLDER
@@ -105,6 +106,99 @@ def list_recent_saves():
             if json_files and "packed_images.db" in db_files:
                 recents.append(name)
     return jsonify(recents)
+
+
+@app.route("/export_marked", methods=["POST"])
+def export_marked():
+    marks = request.json.get("marks", {})
+    extract_path = session.get("extract_path")
+    if not extract_path:
+        return jsonify({"error": "No file loaded"}), 400
+
+    import tempfile, zipfile, shutil, sqlite3, os, json
+    from flask import send_file
+
+    def attachment_id_from_ref(ref: str) -> str:
+        """
+        Convert refs like:
+          'db://attachments/12345'
+          'attachments/12345'
+          '12345'
+        into bare ID: '12345'
+        """
+        s = ref or ""
+        if s.startswith("db://"):
+            s = s[5:]  # strip 'db://'
+        if s.startswith("attachments/"):
+            s = s.split("/", 1)[1]
+        return s
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        used_attachment_ids = set()
+        chunk_files = []
+
+        # Process JSON files one-by-one and write filtered copies
+        for idx, fname in enumerate(session["json_files"]):
+            src = os.path.join(extract_path, fname)
+            with open(src, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            new_messages = []
+            for mi, msg in enumerate(data.get("messages", [])):
+                key = f"{idx}:{mi}"
+                if key in marks:
+                    new_messages.append(msg)
+                    # track used attachment IDs
+                    for att in msg.get("attachments", []) or []:
+                        aid = attachment_id_from_ref(att)
+                        if aid:
+                            used_attachment_ids.add(aid)
+
+            # Only write chunk if it still has messages
+            if new_messages:
+                data["messages"] = new_messages
+                new_fname = f"{len(chunk_files)}.json"  # sequential renaming
+                dst = os.path.join(tmpdir, new_fname)
+                with open(dst, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                chunk_files.append(new_fname)
+
+        # Copy DB and remove unreferenced attachments
+        db_src = os.path.join(extract_path, "packed_images.db")
+        db_dst = os.path.join(tmpdir, "packed_images.db")
+        if os.path.abspath(db_src) != os.path.abspath(db_dst):
+            shutil.copy(db_src, db_dst)
+
+        conn = sqlite3.connect(db_dst)
+        c = conn.cursor()
+        # Keep only rows where attachments.id is referenced
+        if used_attachment_ids:
+            placeholders = ",".join("?" for _ in used_attachment_ids)
+            c.execute(
+                f"DELETE FROM attachments WHERE id NOT IN ({placeholders})",
+                tuple(used_attachment_ids),
+            )
+        else:
+            # No marked attachments -> clear table
+            c.execute("DELETE FROM attachments")
+        conn.commit()
+        # Optional: shrink DB size
+        c.execute("VACUUM")
+        conn.commit()
+        conn.close()
+
+        # Create zip (memory-efficient: from disk)
+        zip_path = os.path.join(tmpdir, "marked_export.zip")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+            # write JSON chunks
+            for f in chunk_files:
+                zipf.write(os.path.join(tmpdir, f), arcname=f)
+            # write filtered DB
+            zipf.write(os.path.join(tmpdir, "packed_images.db"), arcname="packed_images.db")
+
+        return send_file(zip_path, as_attachment=True, download_name="marked_export.zip")
+
+
 
 
 @app.route("/load_recent", methods=["POST"])
@@ -129,7 +223,6 @@ def load_recent():
 
     data = load_chunk(0)
     return jsonify({"message": "Recent loaded", "chunk_index": 0, "data": data})
-
 
 
 @app.route("/navigate", methods=["POST"])
@@ -160,7 +253,8 @@ def navigate():
 def get_attachment(attachment_id):
     db_path = os.path.join(session["extract_path"], 'packed_images.db')
     if not os.path.exists(db_path):
-        return jsonify({"error": "Database not found", "info": f"upload_folder: {db_path} , extract_folder: {session["extract_path"]}"}), 404
+        return jsonify({"error": "Database not found",
+                        "info": f"upload_folder: {db_path} , extract_folder: {session["extract_path"]}"}), 404
 
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
@@ -202,9 +296,11 @@ def attachment(file_id):
     file_name, mime_type, blob = row
     return send_file(io.BytesIO(blob), mimetype=mime_type, as_attachment=False, download_name=file_name)
 
+
 @app.route("/save_marked", methods=["POST"])
 def save_marked():
     marks = request.json.get("marks", {})
+    groups = request.json.get("groups", {})  # { "idx:mi": groupNum }
     extract_path = session.get("extract_path")
     if not extract_path:
         return jsonify({"error": "No file loaded"}), 400
@@ -212,26 +308,39 @@ def save_marked():
     save_path = os.path.join(SAVE_FOLDER, os.path.basename(extract_path))
     os.makedirs(save_path, exist_ok=True)
 
+    # rewrite json files with marks + groups injected
     for idx, fname in enumerate(session["json_files"]):
         src = os.path.join(extract_path, fname)
         dst = os.path.join(save_path, fname)
         with open(src, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # inject marks
+
         for mi, msg in enumerate(data.get("messages", [])):
             key = f"{idx}:{mi}"
+            # ✅ marks
             if key in marks:
                 msg["marked"] = True
+            else:
+                msg.pop("marked", None)
+
+            # ✅ groups
+            if key in groups:
+                msg["group"] = groups[key]
+            else:
+                msg.pop("group", None)
+
         with open(dst, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    # also copy db unchanged for now
+    # copy DB safely
     db_src = os.path.join(extract_path, "packed_images.db")
     if os.path.exists(db_src):
-        import shutil
-        shutil.copy(db_src, save_path)
+        db_dst = os.path.join(save_path, "packed_images.db")
+        if os.path.abspath(db_src) != os.path.abspath(db_dst):
+            shutil.copy(db_src, db_dst)
 
-    return jsonify({"message": "Marked data saved"})
+    return jsonify({"message": "Marked + grouped data saved"})
+
 
 @app.route("/export_save", methods=["POST"])
 def export_save():
@@ -259,7 +368,7 @@ def export_save():
                 new_msgs.append(msg)
                 # collect attachment ids
                 for att in msg.get("attachments", []):
-                    attid = att.replace("db://attachments/","")
+                    attid = att.replace("db://attachments/", "")
                     kept_attachments.add(attid)
         data["messages"] = new_msgs
         with open(dst, "w", encoding="utf-8") as f:
@@ -277,13 +386,15 @@ def export_save():
         cdst.execute("CREATE TABLE attachments (id TEXT PRIMARY KEY, file_name TEXT, mime_type TEXT, data BLOB)")
         for attid in kept_attachments:
             row = csrc.execute("SELECT id,file_name,mime_type,data FROM attachments WHERE id=?", (attid,)).fetchone()
-            if row: cdst.execute("INSERT INTO attachments VALUES (?,?,?,?)", row)
+            if row:
+                cdst.execute("INSERT INTO attachments VALUES (?,?,?,?)", row)
         conn_dst.commit()
-        conn_src.close(); conn_dst.close()
+        conn_src.close()
+        conn_dst.close()
 
     # zip it
     zip_path = os.path.join(SAVE_FOLDER, "exported.zip")
-    shutil.make_archive(zip_path.replace(".zip",""), 'zip', temp_dir)
+    shutil.make_archive(zip_path.replace(".zip", ""), 'zip', temp_dir)
     shutil.rmtree(temp_dir)
 
     return send_file(zip_path, as_attachment=True)

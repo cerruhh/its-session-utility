@@ -12,7 +12,11 @@ let state = {
 let markMode = false;
 let markedMessages = new Set();
 let lastClickedIndex = null;
-
+let dividerMode = false;
+let pendingDivider = null;  // waiting for second divider
+let groups = []; // [{start, end, group, color}]
+let groupAssignments = new Map();   // key -> groupNum
+let groupColors = {};               // groupNum -> color string
 
 const fileInput = document.getElementById('file-input');
 const canvas = document.getElementById('canvas');
@@ -52,68 +56,120 @@ function renderMessage(msg) {
   return `<div class="message">${text}</div>`;
 }
 
+function randomLightColor() {
+  const r = Math.floor(150 + Math.random() * 105);
+  const g = Math.floor(150 + Math.random() * 105);
+  const b = Math.floor(150 + Math.random() * 105);
+  return `rgb(${r},${g},${b})`;
+}
 
-function renderChunk(data){
+function jumpToDivider(direction) {
+  const keys = groups.flatMap(g => [g.start, g.end]);
+  const currentPos = getCurrentVisibleMessageKey();
+  const idx = keys.indexOf(currentPos);
+  if (idx >= 0) {
+    const target = keys[idx + direction];
+    if (target) scrollToMessage(target);
+  }
+}
+
+
+function renderChunk(data) {
   clearCanvas();
-  console.log(data)
 
-  if(!data || !data.messages){
-    setBottomBar('Chunk ' + (state.chunkIndex ?? '-') + ' | messageCount: ' + (data ? (data.messageCount ?? 0) : 0));
+  if (!data || !data.messages) {
+    setBottomBar(
+      "Chunk " +
+        (state.chunkIndex ?? "-") +
+        " | messageCount: " +
+        (data ? data.messageCount ?? 0 : 0)
+    );
     return;
   }
 
   const messages = data.messages;
 
-  // initialize markedMessages from JSON
-  markedMessages.clear();
-  messages.forEach((msg, i)=>{
-    if(msg.marked){
-      const key = `${state.chunkIndex}:${i}`;
+  // ✅ clear marks for this chunk only
+  messages.forEach((msg, i) => {
+    const key = `${state.chunkIndex}:${i}`;
+    if (msg.marked) {
       markedMessages.add(key);
+    } else {
+      markedMessages.delete(key);
+    }
+
+    // ✅ restore group assignments
+    if (msg.group) {
+      groupAssignments.set(key, msg.group);
+      if (!groupColors[msg.group]) {
+        groupColors[msg.group] = randomLightColor();
+      }
+    } else {
+      groupAssignments.delete(key);
     }
   });
 
   messages.forEach((msg, i) => {
-    const el = document.createElement('div');
-    el.className = 'message';
+    const el = document.createElement("div");
+    el.className = "message";
 
-    // highlight if marked
     const key = `${state.chunkIndex}:${i}`;
-    if(msg.marked || markedMessages.has(key)){
-      el.classList.add('marked');
+
+    // ✅ highlight if marked
+    if (markedMessages.has(key)) {
+      el.classList.add("marked");
     }
 
-    const dateEl = document.createElement('div');
-    dateEl.className = 'msg-date';
-    dateEl.textContent = formatDate(msg.timestamp || '');
+    // ✅ apply group color if assigned
+    if (groupAssignments.has(key)) {
+      const groupNum = groupAssignments.get(key);
+      const color = groupColors[groupNum] || randomLightColor();
+      groupColors[groupNum] = color;
+      el.style.borderLeft = `4px solid ${color}`;
+      el.dataset.group = groupNum;
+    }
 
-    const contentEl = document.createElement('div');
-    contentEl.className = 'msg-content';
+    // date
+    const dateEl = document.createElement("div");
+    dateEl.className = "msg-date";
+    dateEl.textContent = formatDate(msg.timestamp || "");
 
-    const author = document.createElement('div');
-    author.className = 'msg-author';
-    const name = state.showDisplayNames ? (msg.author?.nickname || msg.author?.name) : (msg.author?.name || msg.author?.nickname || '');
+    // content
+    const contentEl = document.createElement("div");
+    contentEl.className = "msg-content";
+
+    const author = document.createElement("div");
+    author.className = "msg-author";
+    const name = state.showDisplayNames
+      ? msg.author?.nickname || msg.author?.name
+      : msg.author?.name || msg.author?.nickname || "";
     author.textContent = `${name}:`;
 
-    const text = document.createElement('div');
-    text.className = 'msg-text';
-    text.innerHTML = marked.parse(msg.content || '');
+    const text = document.createElement("div");
+    text.className = "msg-text";
+    text.innerHTML = marked.parse(msg.content || "");
 
     contentEl.appendChild(author);
     contentEl.appendChild(text);
 
     // attachments
-    if(Array.isArray(msg.attachments) && msg.attachments.length > 0){
-      const acont = document.createElement('div');
-      acont.className = 'attachment';
-      msg.attachments.forEach(att => {
-        const url = '/attachment/' + encodeURIComponent(att.replace(/^db:\/\//, '')) + '?v=' + state.imagesReloadKey;
-        const img = document.createElement('img');
-        img.style.maxWidth = '300px';
-        img.style.display = 'block';
-        img.style.marginTop = '6px';
+    if (Array.isArray(msg.attachments) && msg.attachments.length > 0) {
+      const acont = document.createElement("div");
+      acont.className = "attachment";
+      msg.attachments.forEach((att) => {
+        const url =
+          "/attachment/" +
+          encodeURIComponent(att.replace(/^db:\/\//, "")) +
+          "?v=" +
+          state.imagesReloadKey;
+        const img = document.createElement("img");
+        img.style.maxWidth = "300px";
+        img.style.display = "block";
+        img.style.marginTop = "6px";
         img.src = url;
-        img.onerror = () => { img.style.display='none'; }
+        img.onerror = () => {
+          img.style.display = "none";
+        };
         acont.appendChild(img);
       });
       contentEl.appendChild(acont);
@@ -122,43 +178,76 @@ function renderChunk(data){
     el.appendChild(dateEl);
     el.appendChild(contentEl);
 
-    // ✅ Mark/unmark interactions
-    el.addEventListener('click', (ev)=>{
-      if(markMode){
-        const key = `${state.chunkIndex}:${i}`;
-
-        if(ev.shiftKey && lastClickedIndex !== null){
-          // mark/unmark range
+    // ✅ Interactions
+    el.addEventListener("click", (ev) => {
+      if (markMode) {
+        // mark/unmark
+        if (ev.shiftKey && lastClickedIndex !== null) {
           const start = Math.min(lastClickedIndex, i);
           const end = Math.max(lastClickedIndex, i);
-          for(let j = start; j <= end; j++){
+          for (let j = start; j <= end; j++) {
             const k = `${state.chunkIndex}:${j}`;
             markedMessages.add(k);
             const msgEl = canvas.children[j];
-            if(msgEl) msgEl.classList.add('marked');
+            if (msgEl) msgEl.classList.add("marked");
           }
         } else {
-          // toggle single message
-          if(markedMessages.has(key)){
+          if (markedMessages.has(key)) {
             markedMessages.delete(key);
-            el.classList.remove('marked');
+            el.classList.remove("marked");
           } else {
             markedMessages.add(key);
-            el.classList.add('marked');
+            el.classList.add("marked");
           }
         }
-
         lastClickedIndex = i;
         ev.stopPropagation();
         updateBottomBar();
+      } else if (dividerMode) {
+        // divider mode → place start/end
+        if (!pendingDivider) {
+          pendingDivider = key;
+        } else {
+          const groupNum =
+            Math.max(0, ...Object.keys(groupColors).map(Number)) + 1;
+          const color = randomLightColor();
+          groupColors[groupNum] = color;
+
+          const [cidx1, mi1] = pendingDivider.split(":").map(Number);
+          const [cidx2, mi2] = key.split(":").map(Number);
+
+          if (cidx1 === cidx2 && cidx1 === state.chunkIndex) {
+            const start = Math.min(mi1, mi2);
+            const end = Math.max(mi1, mi2);
+            for (let j = start; j <= end; j++) {
+              const k = `${state.chunkIndex}:${j}`;
+              groupAssignments.set(k, groupNum);
+              const msgEl = canvas.children[j];
+              if (msgEl) {
+                msgEl.style.borderLeft = `4px solid ${color}`;
+                msgEl.dataset.group = groupNum;
+              }
+            }
+          }
+
+          pendingDivider = null;
+          updateBottomBar();
+        }
       }
     });
 
-    el.addEventListener('contextmenu', (ev)=>{
-      if(markMode){
-        const key = `${state.chunkIndex}:${i}`;
+    el.addEventListener("contextmenu", (ev) => {
+      if (markMode) {
         markedMessages.delete(key);
-        el.classList.remove('marked');
+        el.classList.remove("marked");
+        ev.preventDefault();
+        updateBottomBar();
+      } else if (dividerMode && groupAssignments.has(key)) {
+        // remove divider assignment
+        const groupNum = groupAssignments.get(key);
+        groupAssignments.delete(key);
+        el.style.borderLeft = "";
+        el.removeAttribute("data-group");
         ev.preventDefault();
         updateBottomBar();
       }
@@ -171,6 +260,8 @@ function renderChunk(data){
 }
 
 
+
+
 function updateBottomBar(){
   let text = 'No file loaded';
   if(state.loaded && state.data){
@@ -180,6 +271,10 @@ function updateBottomBar(){
   if(markMode){
     text += ' | markmode enabled';
   }
+  if(dividerMode){
+    text += ' | dividermode enabled';
+  }
+
   setBottomBar(text);
 }
 
@@ -242,6 +337,41 @@ async function savePacked(){
 
   const j = await res.json();
   alert('Marked messages saved to SAVE_FOLDER.');
+}
+
+async function exportMarked() {
+  if (!state.loaded) { alert("No file loaded"); return; }
+
+  const marks = {};
+  markedMessages.forEach(k => { marks[k] = true; });
+
+  const res = await fetch("/export_marked", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ marks })
+  });
+
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({ error: "Export failed" }));
+    alert(e.error || "Export failed");
+    return;
+  }
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "marked_export.zip";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Assuming your button has an id="exportBtn"
+const exportBtn = document.getElementById("menu-export-save");
+if (exportBtn) {
+  exportBtn.addEventListener("click", exportMarked);
 }
 
 
@@ -347,6 +477,21 @@ async function refreshRecentSaveMenu(){
   });
 }
 
+function handleDividerClick(idx, mi) {
+  const key = `${idx}:${mi}`;
+  if (!pendingDivider) {
+    pendingDivider = key; // wait for second divider
+  } else {
+    // assign group
+    const groupNum = groups.length + 1;
+    const color = randomLightColor();
+    groups.push({start: pendingDivider, end: key, group: groupNum, color});
+    pendingDivider = null;
+    renderChunk(state.data);
+  }
+}
+
+
 async function loadRecentSave(folder){
   const path = folder; // backend will prepend SAVE_FOLDER
   const res = await fetch('/load_recent', {
@@ -410,7 +555,12 @@ window.addEventListener('keydown', (e)=>{
       updateBottomBar();
       return;
     }
-
+    if (e.ctrlKey && e.key === "2") {
+      markMode = false;
+      dividerMode = !dividerMode;
+      pendingDivider = null;
+      updateBottomBar(); // show "Divider mode" in bottom right
+    }
   }
   // ctrl+shift+r -> reload images
   if(e.ctrlKey && e.shiftKey && e.key.toLowerCase()==='r'){
