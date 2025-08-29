@@ -17,7 +17,7 @@ let pendingDivider = null;  // waiting for second divider
 let groups = []; // [{start, end, group, color}]
 let groupAssignments = new Map();   // key -> groupNum
 let groupColors = {};               // groupNum -> color string
-
+let groupNames = {}; // groupId -> name (optional)
 const fileInput = document.getElementById('file-input');
 const canvas = document.getElementById('canvas');
 const bottombar = document.getElementById('bottombar');
@@ -89,24 +89,20 @@ function renderChunk(data) {
 
   const messages = data.messages;
 
-  // ✅ Clear marks and restore group assignments for this chunk
+  // ✅ clear marks for this chunk only
   messages.forEach((msg, i) => {
     const key = `${state.chunkIndex}:${i}`;
+    if (msg.marked) {
+      markedMessages.add(key);
+    } else {
+      markedMessages.delete(key);
+    }
 
-    // marks
-    if (msg.marked) markedMessages.add(key);
-    else markedMessages.delete(key);
-
-    // group
+    // ✅ restore group assignments
     if (msg.group) {
-      groupAssignments.set(key, msg.group.id);
-      // assign color if new
-      if (!groupColors[msg.group.id]) {
-        groupColors[msg.group.id] = msg.group.color || randomLightColor();
-      }
-      // store optional name
-      if (msg.group.name) {
-        groupNames[msg.group.id] = msg.group.name;
+      groupAssignments.set(key, msg.group);
+      if (!groupColors[msg.group]) {
+        groupColors[msg.group] = randomLightColor();
       }
     } else {
       groupAssignments.delete(key);
@@ -117,21 +113,20 @@ function renderChunk(data) {
     const el = document.createElement("div");
     el.className = "message";
 
-    // ✅ start indexing at 1
-    const displayIndex = i + 1;
-    const key = `${state.chunkIndex}:${displayIndex}`;
+    const key = `${state.chunkIndex}:${i}`;
 
-    // highlight if marked
-    if (markedMessages.has(key)) el.classList.add("marked");
+    // ✅ highlight if marked
+    if (markedMessages.has(key)) {
+      el.classList.add("marked");
+    }
 
-    // apply group coloring
+    // ✅ apply group color if assigned
     if (groupAssignments.has(key)) {
-        const groupId = groupAssignments.get(key);
-        const color = groupColors[groupId] || randomLightColor();
-        groupColors[groupId] = color;
-        el.style.borderLeft = `4px solid ${color}`;
-        el.dataset.group = groupId;
-        if (groupNames[groupId]) el.title = groupNames[groupId];
+      const groupNum = groupAssignments.get(key);
+      const color = groupColors[groupNum] || randomLightColor();
+      groupColors[groupNum] = color;
+      el.style.borderLeft = `4px solid ${color}`;
+      el.dataset.group = groupNum;
     }
 
     // date
@@ -142,6 +137,7 @@ function renderChunk(data) {
     // content
     const contentEl = document.createElement("div");
     contentEl.className = "msg-content";
+
     const author = document.createElement("div");
     author.className = "msg-author";
     const name = state.showDisplayNames
@@ -171,7 +167,9 @@ function renderChunk(data) {
         img.style.display = "block";
         img.style.marginTop = "6px";
         img.src = url;
-        img.onerror = () => (img.style.display = "none");
+        img.onerror = () => {
+          img.style.display = "none";
+        };
         acont.appendChild(img);
       });
       contentEl.appendChild(acont);
@@ -180,15 +178,89 @@ function renderChunk(data) {
     el.appendChild(dateEl);
     el.appendChild(contentEl);
 
-    // interactions
-    el.addEventListener("click", (ev) => handleMessageClick(ev, i, key));
-    el.addEventListener("contextmenu", (ev) => handleMessageContext(ev, i, key));
+    // ✅ Interactions
+    el.addEventListener("click", (ev) => {
+      if (markMode) {
+        // mark/unmark
+        if (ev.shiftKey && lastClickedIndex !== null) {
+          const start = Math.min(lastClickedIndex, i);
+          const end = Math.max(lastClickedIndex, i);
+          for (let j = start; j <= end; j++) {
+            const k = `${state.chunkIndex}:${j}`;
+            markedMessages.add(k);
+            const msgEl = canvas.children[j];
+            if (msgEl) msgEl.classList.add("marked");
+          }
+        } else {
+          if (markedMessages.has(key)) {
+            markedMessages.delete(key);
+            el.classList.remove("marked");
+          } else {
+            markedMessages.add(key);
+            el.classList.add("marked");
+          }
+        }
+        lastClickedIndex = i;
+        ev.stopPropagation();
+        updateBottomBar();
+      } else if (dividerMode) {
+        // divider mode → place start/end
+        if (!pendingDivider) {
+          pendingDivider = key;
+        } else {
+          const groupNum =
+            Math.max(0, ...Object.keys(groupColors).map(Number)) + 1;
+          const color = randomLightColor();
+          groupColors[groupNum] = color;
+
+          const [cidx1, mi1] = pendingDivider.split(":").map(Number);
+          const [cidx2, mi2] = key.split(":").map(Number);
+
+          if (cidx1 === cidx2 && cidx1 === state.chunkIndex) {
+            const start = Math.min(mi1, mi2);
+            const end = Math.max(mi1, mi2);
+            for (let j = start; j <= end; j++) {
+              const k = `${state.chunkIndex}:${j}`;
+              groupAssignments.set(k, groupNum);
+              const msgEl = canvas.children[j];
+              if (msgEl) {
+                msgEl.style.borderLeft = `4px solid ${color}`;
+                msgEl.dataset.group = groupNum;
+              }
+            }
+          }
+
+          pendingDivider = null;
+          updateBottomBar();
+        }
+      }
+    });
+
+    el.addEventListener("contextmenu", (ev) => {
+      if (markMode) {
+        markedMessages.delete(key);
+        el.classList.remove("marked");
+        ev.preventDefault();
+        updateBottomBar();
+      } else if (dividerMode && groupAssignments.has(key)) {
+        // remove divider assignment
+        const groupNum = groupAssignments.get(key);
+        groupAssignments.delete(key);
+        el.style.borderLeft = "";
+        el.removeAttribute("data-group");
+        ev.preventDefault();
+        updateBottomBar();
+      }
+    });
 
     canvas.appendChild(el);
   });
 
   updateBottomBar();
 }
+
+
+
 
 function updateBottomBar(){
   let text = 'No file loaded';
@@ -225,12 +297,14 @@ async function doUploadFile(file){
   renderChunk(state.data);
 }
 
+
 async function navigate(direction){
   if(!state.loaded){ alert('No file loaded'); return }
   const res = await fetch('/navigate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({direction})});
   if(!res.ok){ const e = await res.json().catch(()=>({error:'nav failed'})); alert(e.error||'navigate failed'); return }
   const j = await res.json();
   state.chunkIndex = j.chunk_index;
+  state.fileCount = j.file_count || state.fileCount;
   state.data = j.data;
   renderChunk(state.data);
 }
@@ -241,20 +315,32 @@ async function reloadChunk(){
   if(!res.ok){ const e = await res.json().catch(()=>({error:'reload failed'})); alert(e.error||'reload failed'); return }
   const j = await res.json();
   state.chunkIndex = j.chunk_index;
+  state.fileCount = j.file_count || state.fileCount;
   state.data = j.data;
   renderChunk(state.data);
 }
 
+
 async function savePacked(){
-  if(!state.loaded){
-    alert('No file loaded');
-    return;
+  if(!state.loaded){ alert('No file loaded'); return; }
+
+  // marks
+  const marks = Object.fromEntries([...markedMessages].map(k => [k, true]));
+
+  // groups: build mapping of key -> {id,name,color}
+  const groupPayload = { assignments: {} };
+  for (const [key, gid] of groupAssignments.entries()) {
+    groupPayload.assignments[key] = {
+      id: gid,
+      name: groupNames[gid] || null,
+      color: groupColors[gid] || null
+    };
   }
 
   const res = await fetch('/save_marked', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({marks: Object.fromEntries([...markedMessages].map(k=>[k,true]))})
+    body: JSON.stringify({marks, groups: groupPayload})
   });
 
   if(!res.ok){
@@ -264,8 +350,9 @@ async function savePacked(){
   }
 
   const j = await res.json();
-  alert('Marked messages saved to SAVE_FOLDER.');
+  alert('Marked messages & groups saved to SAVE_FOLDER.');
 }
+
 
 async function exportMarked() {
   if (!state.loaded) { alert("No file loaded"); return; }
@@ -273,10 +360,19 @@ async function exportMarked() {
   const marks = {};
   markedMessages.forEach(k => { marks[k] = true; });
 
+  const groupsPayload = { assignments: {} };
+  for (const [key, gid] of groupAssignments.entries()) {
+    groupsPayload.assignments[key] = {
+      id: gid,
+      name: groupNames[gid] || null,
+      color: groupColors[gid] || null
+    };
+  }
+
   const res = await fetch("/export_marked", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ marks })
+    body: JSON.stringify({ marks, groups: groupsPayload })
   });
 
   if (!res.ok) {
@@ -295,6 +391,7 @@ async function exportMarked() {
   a.remove();
   URL.revokeObjectURL(url);
 }
+
 
 // Assuming your button has an id="exportBtn"
 const exportBtn = document.getElementById("menu-export-save");

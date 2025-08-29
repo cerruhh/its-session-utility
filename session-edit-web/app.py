@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import zipfile
+import re
 # from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, session, abort
 
@@ -23,6 +24,13 @@ logging.basicConfig(level=logging.INFO)
 @app.route("/")
 def index():
     return render_template("index.html")
+
+def sort_json_files(files):
+    # Sort by the first integer found in filename; if none, fall back to filename
+    def keyfn(f):
+        m = re.search(r'(\d+)', f)
+        return (int(m.group(1)), f) if m else (float('inf'), f)
+    return sorted(files, key=keyfn)
 
 
 @app.route("/upload", methods=["POST"])
@@ -44,7 +52,8 @@ def upload():
     with zipfile.ZipFile(filepath, 'r') as z:
         z.extractall(extract_path)
 
-    json_files = sorted([f for f in os.listdir(extract_path) if f.endswith(".json")])
+    json_files = [f for f in os.listdir(extract_path) if f.endswith(".json")]
+    json_files = sort_json_files(json_files)
     db_files = [f for f in os.listdir(extract_path) if f.endswith(".db")]
 
     if not json_files or "packed_images.db" not in db_files:
@@ -53,8 +62,15 @@ def upload():
     session["json_files"] = json_files
     session["extract_path"] = extract_path
     session["current_index"] = 0
+    session["file_count"] = len(json_files)
 
-    return jsonify({"message": "File loaded", "chunk_index": 0})
+    data = load_chunk(0)
+    return jsonify({
+        "message": "File loaded",
+        "chunk_index": 0,
+        "file_count": len(json_files),
+        "data": data
+    })
 
 
 def load_chunk(idx):
@@ -82,7 +98,8 @@ def get_chunk():
     data = load_chunk(idx)
     if not data:
         return jsonify({"error": "No file loaded"}), 400
-    return jsonify({"chunk_index": idx, "data": data})
+    return jsonify({"chunk_index": idx, "file_count": session.get("file_count", len(session.get("json_files", []))), "data": data})
+
 
 
 # Recents
@@ -117,6 +134,9 @@ def list_recent_saves():
 @app.route("/export_marked", methods=["POST"])
 def export_marked():
     marks = request.json.get("marks", {})
+    groups = request.json.get("groups", {})
+    group_assignments = groups.get("assignments", {})
+
     extract_path = session.get("extract_path")
     if not extract_path:
         return jsonify({"error": "No file loaded"}), 400
@@ -125,16 +145,9 @@ def export_marked():
     from flask import send_file
 
     def attachment_id_from_ref(ref: str) -> str:
-        """
-        Convert refs like:
-          'db://attachments/12345'
-          'attachments/12345'
-          '12345'
-        into bare ID: '12345'
-        """
         s = ref or ""
         if s.startswith("db://"):
-            s = s[5:]  # strip 'db://'
+            s = s[5:]
         if s.startswith("attachments/"):
             s = s.split("/", 1)[1]
         return s
@@ -143,7 +156,6 @@ def export_marked():
         used_attachment_ids = set()
         chunk_files = []
 
-        # Process JSON files one-by-one and write filtered copies
         for idx, fname in enumerate(session["json_files"]):
             src = os.path.join(extract_path, fname)
             with open(src, "r", encoding="utf-8") as f:
@@ -153,17 +165,28 @@ def export_marked():
             for mi, msg in enumerate(data.get("messages", [])):
                 key = f"{idx}:{mi}"
                 if key in marks:
-                    new_messages.append(msg)
-                    # track used attachment IDs
+                    # copy message and include its group if present in payload
+                    new_msg = msg.copy()
+                    if key in group_assignments:
+                        ga = group_assignments[key]
+                        # store group object
+                        new_msg["group"] = {}
+                        if "id" in ga: new_msg["group"]["id"] = ga["id"]
+                        if "name" in ga: new_msg["group"]["name"] = ga["name"]
+                        if "color" in ga: new_msg["group"]["color"] = ga["color"]
+                    else:
+                        new_msg.pop("group", None)
+                    new_messages.append(new_msg)
+
+                    # collect referenced attachments
                     for att in msg.get("attachments", []) or []:
                         aid = attachment_id_from_ref(att)
                         if aid:
                             used_attachment_ids.add(aid)
 
-            # Only write chunk if it still has messages
             if new_messages:
                 data["messages"] = new_messages
-                new_fname = f"{len(chunk_files)}.json"  # sequential renaming
+                new_fname = f"{len(chunk_files)}.json"
                 dst = os.path.join(tmpdir, new_fname)
                 with open(dst, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
@@ -172,35 +195,37 @@ def export_marked():
         # Copy DB and remove unreferenced attachments
         db_src = os.path.join(extract_path, "packed_images.db")
         db_dst = os.path.join(tmpdir, "packed_images.db")
-        if os.path.abspath(db_src) != os.path.abspath(db_dst):
+        if os.path.exists(db_src):
             shutil.copy(db_src, db_dst)
 
-        conn = sqlite3.connect(db_dst)
-        c = conn.cursor()
-        # Keep only rows where attachments.id is referenced
-        if used_attachment_ids:
-            placeholders = ",".join("?" for _ in used_attachment_ids)
-            c.execute(
-                f"DELETE FROM attachments WHERE id NOT IN ({placeholders})",
-                tuple(used_attachment_ids),
-            )
+            conn = sqlite3.connect(db_dst)
+            c = conn.cursor()
+            if used_attachment_ids:
+                placeholders = ",".join("?" for _ in used_attachment_ids)
+                c.execute(
+                    f"DELETE FROM attachments WHERE id NOT IN ({placeholders})",
+                    tuple(used_attachment_ids),
+                )
+            else:
+                c.execute("DELETE FROM attachments")
+            conn.commit()
+            c.execute("VACUUM")
+            conn.commit()
+            conn.close()
         else:
-            # No marked attachments -> clear table
-            c.execute("DELETE FROM attachments")
-        conn.commit()
-        # Optional: shrink DB size
-        c.execute("VACUUM")
-        conn.commit()
-        conn.close()
+            # If no DB, create an empty attachments DB to avoid missing file in zip
+            conn = sqlite3.connect(db_dst)
+            c = conn.cursor()
+            c.execute("CREATE TABLE attachments (id TEXT PRIMARY KEY, file_name TEXT, mime_type TEXT, data BLOB)")
+            conn.commit()
+            conn.close()
 
-        # Create zip (memory-efficient: from disk)
+        # create zip
         zip_path = os.path.join(tmpdir, "marked_export.zip")
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-            # write JSON chunks
             for f in chunk_files:
                 zipf.write(os.path.join(tmpdir, f), arcname=f)
-            # write filtered DB
-            zipf.write(os.path.join(tmpdir, "packed_images.db"), arcname="packed_images.db")
+            zipf.write(db_dst, arcname="packed_images.db")
 
         return send_file(zip_path, as_attachment=True, download_name="marked_export.zip")
 
@@ -208,7 +233,7 @@ def export_marked():
 @app.route("/load_recent", methods=["POST"])
 def load_recent():
     folder = request.json.get("folder")
-    use_save_folder = request.json.get("save_folder", False)  # new flag
+    use_save_folder = request.json.get("save_folder", False)
 
     base_folder = SAVE_FOLDER if use_save_folder else EXTRACT_FOLDER
     extract_path = os.path.join(base_folder, folder)
@@ -216,7 +241,8 @@ def load_recent():
     if not os.path.exists(extract_path):
         return jsonify({"error": "Folder not found"}), 404
 
-    json_files = sorted([f for f in os.listdir(extract_path) if f.endswith(".json")])
+    json_files = [f for f in os.listdir(extract_path) if f.endswith(".json")]
+    json_files = sort_json_files(json_files)
     db_files = [f for f in os.listdir(extract_path) if f.endswith(".db")]
     if not json_files or "packed_images.db" not in db_files:
         return jsonify({"error": "Invalid folder"}), 400
@@ -224,9 +250,10 @@ def load_recent():
     session["json_files"] = json_files
     session["extract_path"] = extract_path
     session["current_index"] = 0
+    session["file_count"] = len(json_files)
 
     data = load_chunk(0)
-    return jsonify({"message": "Recent loaded", "chunk_index": 0, "data": data})
+    return jsonify({"message": "Recent loaded", "chunk_index": 0, "file_count": len(json_files), "data": data})
 
 
 @app.route("/navigate", methods=["POST"])
@@ -236,10 +263,9 @@ def navigate():
     if not json_files:
         return jsonify({"error": "No file loaded"}), 400
 
-    # initialize current index safely
-    idx = session.get("current_index")
+    idx = session.get("current_index", 0)
     if idx is None or idx < 0 or idx >= len(json_files):
-        idx = 0  # start at the first available chunk
+        idx = 0
 
     if direction == "first":
         idx = 0
@@ -254,7 +280,7 @@ def navigate():
 
     session["current_index"] = idx
     data = load_chunk(idx)
-    return jsonify({"chunk_index": idx, "data": data})
+    return jsonify({"chunk_index": idx, "file_count": len(json_files), "data": data})
 
 
 
@@ -309,7 +335,9 @@ def attachment(file_id):
 @app.route("/save_marked", methods=["POST"])
 def save_marked():
     marks = request.json.get("marks", {})
-    groups = request.json.get("groups", {})  # { "groupNum": {"name": "Group Name"} }
+    groups = request.json.get("groups", {})  # expected: { "assignments": { "0:3": {"id":1,"name":"A","color":"rgb(...)"} } }
+    group_assignments = groups.get("assignments", {})
+
     extract_path = session.get("extract_path")
     if not extract_path:
         return jsonify({"error": "No file loaded"}), 400
@@ -317,7 +345,6 @@ def save_marked():
     save_path = os.path.join(SAVE_FOLDER, os.path.basename(extract_path))
     os.makedirs(save_path, exist_ok=True)
 
-    # rewrite JSON files with marks and group info
     for idx, fname in enumerate(session["json_files"]):
         src = os.path.join(extract_path, fname)
         dst = os.path.join(save_path, fname)
@@ -332,11 +359,18 @@ def save_marked():
             else:
                 msg.pop("marked", None)
 
-            # group assignments
-            if key in groups.get("assignments", {}):
-                gnum = groups["assignments"][key]["id"]
-                gname = groups["assignments"][key].get("name", f"Group {gnum}")
-                msg["group"] = {"id": gnum, "name": gname}
+            # group assignments: store as object {id,name,color}
+            if key in group_assignments:
+                ga = group_assignments[key]
+                # ensure id exists
+                gid = ga.get("id")
+                gname = ga.get("name") if "name" in ga else None
+                gcolor = ga.get("color") if "color" in ga else None
+                msg["group"] = {"id": gid}
+                if gname is not None:
+                    msg["group"]["name"] = gname
+                if gcolor is not None:
+                    msg["group"]["color"] = gcolor
             else:
                 msg.pop("group", None)
 
