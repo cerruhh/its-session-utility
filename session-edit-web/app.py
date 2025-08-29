@@ -1,10 +1,10 @@
-import logging
-
-import os, shutil
-import zipfile
 import io
 import json
+import logging
+import os
+import shutil
 import sqlite3
+import zipfile
 # from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, session, abort
 
@@ -62,12 +62,18 @@ def load_chunk(idx):
     extract_path = session.get("extract_path")
     if not json_files or not extract_path:
         return None
-    if idx < 0 or idx >= len(json_files):
-        return None
+
+    # ensure index is in bounds
+    idx = max(0, min(idx, len(json_files) - 1))
 
     path = os.path.join(extract_path, json_files[idx])
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+
+    # include message count for UI convenience
+    data["messageCount"] = len(data.get("messages", []))
+    return data
+
 
 
 @app.route("/get_chunk")
@@ -199,8 +205,6 @@ def export_marked():
         return send_file(zip_path, as_attachment=True, download_name="marked_export.zip")
 
 
-
-
 @app.route("/load_recent", methods=["POST"])
 def load_recent():
     folder = request.json.get("folder")
@@ -228,10 +232,14 @@ def load_recent():
 @app.route("/navigate", methods=["POST"])
 def navigate():
     direction = request.json.get("direction")
-    idx = session.get("current_index", 0)
     json_files = session.get("json_files", [])
     if not json_files:
         return jsonify({"error": "No file loaded"}), 400
+
+    # initialize current index safely
+    idx = session.get("current_index")
+    if idx is None or idx < 0 or idx >= len(json_files):
+        idx = 0  # start at the first available chunk
 
     if direction == "first":
         idx = 0
@@ -247,6 +255,7 @@ def navigate():
     session["current_index"] = idx
     data = load_chunk(idx)
     return jsonify({"chunk_index": idx, "data": data})
+
 
 
 @app.route('/attachment/<path:attachment_id>')
@@ -300,7 +309,7 @@ def attachment(file_id):
 @app.route("/save_marked", methods=["POST"])
 def save_marked():
     marks = request.json.get("marks", {})
-    groups = request.json.get("groups", {})  # { "idx:mi": groupNum }
+    groups = request.json.get("groups", {})  # { "groupNum": {"name": "Group Name"} }
     extract_path = session.get("extract_path")
     if not extract_path:
         return jsonify({"error": "No file loaded"}), 400
@@ -308,7 +317,7 @@ def save_marked():
     save_path = os.path.join(SAVE_FOLDER, os.path.basename(extract_path))
     os.makedirs(save_path, exist_ok=True)
 
-    # rewrite json files with marks + groups injected
+    # rewrite JSON files with marks and group info
     for idx, fname in enumerate(session["json_files"]):
         src = os.path.join(extract_path, fname)
         dst = os.path.join(save_path, fname)
@@ -317,15 +326,17 @@ def save_marked():
 
         for mi, msg in enumerate(data.get("messages", [])):
             key = f"{idx}:{mi}"
-            # ✅ marks
+            # marks
             if key in marks:
                 msg["marked"] = True
             else:
                 msg.pop("marked", None)
 
-            # ✅ groups
-            if key in groups:
-                msg["group"] = groups[key]
+            # group assignments
+            if key in groups.get("assignments", {}):
+                gnum = groups["assignments"][key]["id"]
+                gname = groups["assignments"][key].get("name", f"Group {gnum}")
+                msg["group"] = {"id": gnum, "name": gname}
             else:
                 msg.pop("group", None)
 
@@ -339,7 +350,7 @@ def save_marked():
         if os.path.abspath(db_src) != os.path.abspath(db_dst):
             shutil.copy(db_src, db_dst)
 
-    return jsonify({"message": "Marked + grouped data saved"})
+    return jsonify({"message": "Marked data saved"})
 
 
 @app.route("/export_save", methods=["POST"])
