@@ -76,20 +76,21 @@ function jumpToDivider(direction) {
 
 function renderChunk(data) {
   clearCanvas();
-
   if (!data || !data.messages) {
     setBottomBar(
-      "Chunk " +
-        (state.chunkIndex ?? "-") +
-        " | messageCount: " +
-        (data ? data.messageCount ?? 0 : 0)
+        "Chunk " + (state.chunkIndex ?? "-") + " | messageCount: " + (data ? data.messageCount ?? 0 : 0)
     );
     return;
   }
 
+  // defensive: ensure state.chunkIndex is a number
+  if (typeof state.chunkIndex !== "number") {
+    state.chunkIndex = Number(state.chunkIndex) || 0;
+  }
+
   const messages = data.messages;
 
-  // ✅ clear marks for this chunk only
+  // restore per-chunk marks and groups
   messages.forEach((msg, i) => {
     const key = `${state.chunkIndex}:${i}`;
     if (msg.marked) {
@@ -97,36 +98,36 @@ function renderChunk(data) {
     } else {
       markedMessages.delete(key);
     }
-
-    // ✅ restore group assignments
-    if (msg.group) {
-      groupAssignments.set(key, msg.group);
-      if (!groupColors[msg.group]) {
-        groupColors[msg.group] = randomLightColor();
+    // restore group assignments if present in JSON
+    if (msg.group && msg.group.id != null) {
+      const gid = Number(msg.group.id);
+      groupAssignments.set(key, gid);
+      if (!groupColors[gid]) {
+        groupColors[gid] = msg.group.color || randomLightColor();
       }
+      if (msg.group.name) groupNames[gid] = msg.group.name;
     } else {
       groupAssignments.delete(key);
     }
   });
 
+  // render each message DOM
   messages.forEach((msg, i) => {
     const el = document.createElement("div");
     el.className = "message";
-
     const key = `${state.chunkIndex}:${i}`;
 
-    // ✅ highlight if marked
-    if (markedMessages.has(key)) {
-      el.classList.add("marked");
-    }
+    // Marked visual
+    if (markedMessages.has(key)) el.classList.add("marked");
 
-    // ✅ apply group color if assigned
+    // Group color if assigned
     if (groupAssignments.has(key)) {
       const groupNum = groupAssignments.get(key);
       const color = groupColors[groupNum] || randomLightColor();
       groupColors[groupNum] = color;
       el.style.borderLeft = `4px solid ${color}`;
       el.dataset.group = groupNum;
+      if (groupNames[groupNum]) el.title = groupNames[groupNum];
     }
 
     // date
@@ -134,42 +135,37 @@ function renderChunk(data) {
     dateEl.className = "msg-date";
     dateEl.textContent = formatDate(msg.timestamp || "");
 
-    // content
+    // content & author
     const contentEl = document.createElement("div");
     contentEl.className = "msg-content";
-
     const author = document.createElement("div");
     author.className = "msg-author";
-    const name = state.showDisplayNames
-      ? msg.author?.nickname || msg.author?.name
-      : msg.author?.name || msg.author?.nickname || "";
+    const name = state.showDisplayNames ? msg.author?.nickname || msg.author?.name : msg.author?.name || msg.author?.nickname || "";
     author.textContent = `${name}:`;
-
     const text = document.createElement("div");
     text.className = "msg-text";
-    text.innerHTML = marked.parse(msg.content || "");
-
+    // Use marked.parse if available; fallback to safe text
+    try { text.innerHTML = marked.parse(msg.content || ""); } catch (e) { text.textContent = msg.content || ""; }
     contentEl.appendChild(author);
     contentEl.appendChild(text);
 
-    // attachments
+    // attachments (handle string or object)
     if (Array.isArray(msg.attachments) && msg.attachments.length > 0) {
       const acont = document.createElement("div");
       acont.className = "attachment";
       msg.attachments.forEach((att) => {
-        const url =
-          "/attachment/" +
-          encodeURIComponent(att.replace(/^db:\/\//, "")) +
-          "?v=" +
-          state.imagesReloadKey;
+        const ref = attachmentRef(att); // NEW safe accessor
+        if (!ref) return;
+        // strip db:// or attachments/ prefixes if present
+        let id = ref.replace(/^db:\/\//, "");
+        if (id.startsWith("attachments/")) id = id.split("/", 1)[1] || id; // take last segment if prefixed
+        const url = "/attachment/" + encodeURIComponent(id) + "?v=" + state.imagesReloadKey;
         const img = document.createElement("img");
         img.style.maxWidth = "300px";
         img.style.display = "block";
         img.style.marginTop = "6px";
         img.src = url;
-        img.onerror = () => {
-          img.style.display = "none";
-        };
+        img.onerror = () => { img.style.display = "none"; };
         acont.appendChild(img);
       });
       contentEl.appendChild(acont);
@@ -178,10 +174,10 @@ function renderChunk(data) {
     el.appendChild(dateEl);
     el.appendChild(contentEl);
 
-    // ✅ Interactions
+    // --- Interactions
     el.addEventListener("click", (ev) => {
       if (markMode) {
-        // mark/unmark
+        // multi-select by shift
         if (ev.shiftKey && lastClickedIndex !== null) {
           const start = Math.min(lastClickedIndex, i);
           const end = Math.max(lastClickedIndex, i);
@@ -192,30 +188,40 @@ function renderChunk(data) {
             if (msgEl) msgEl.classList.add("marked");
           }
         } else {
-          if (markedMessages.has(key)) {
-            markedMessages.delete(key);
-            el.classList.remove("marked");
-          } else {
-            markedMessages.add(key);
-            el.classList.add("marked");
-          }
+          if (markedMessages.has(key)) { markedMessages.delete(key); el.classList.remove("marked"); }
+          else { markedMessages.add(key); el.classList.add("marked"); }
         }
         lastClickedIndex = i;
         ev.stopPropagation();
         updateBottomBar();
       } else if (dividerMode) {
-        // divider mode → place start/end
+        // divider mode → place start/end; allow group naming/reuse
         if (!pendingDivider) {
           pendingDivider = key;
+          updateBottomBar();
         } else {
-          const groupNum =
-            Math.max(0, ...Object.keys(groupColors).map(Number)) + 1;
-          const color = randomLightColor();
+          // finish divider pair
+          // prompt for group name (enter existing name to reuse)
+          const inputName = prompt("Enter group name (leave blank to auto-name):");
+          // find existing group with same name
+          let groupNum = null;
+          if (inputName) {
+            for (const [gid, gname] of Object.entries(groupNames)) {
+              if (gname === inputName) { groupNum = Number(gid); break; }
+            }
+          }
+          if (groupNum === null) {
+            // create new numeric id
+            const existingIds = Object.keys(groupColors).map(Number);
+            groupNum = existingIds.length === 0 ? 1 : Math.max(...existingIds) + 1;
+          }
+          const color = groupColors[groupNum] || randomLightColor();
           groupColors[groupNum] = color;
+          if (inputName) groupNames[groupNum] = inputName;
 
           const [cidx1, mi1] = pendingDivider.split(":").map(Number);
           const [cidx2, mi2] = key.split(":").map(Number);
-
+          // support cross-chunk by assigning each message key explicitly
           if (cidx1 === cidx2 && cidx1 === state.chunkIndex) {
             const start = Math.min(mi1, mi2);
             const end = Math.max(mi1, mi2);
@@ -223,13 +229,32 @@ function renderChunk(data) {
               const k = `${state.chunkIndex}:${j}`;
               groupAssignments.set(k, groupNum);
               const msgEl = canvas.children[j];
-              if (msgEl) {
-                msgEl.style.borderLeft = `4px solid ${color}`;
-                msgEl.dataset.group = groupNum;
+              if (msgEl) { msgEl.style.borderLeft = `4px solid ${color}`; msgEl.dataset.group = groupNum; msgEl.title = groupNames[groupNum] || ""; }
+            }
+          } else {
+            // if across chunks, we still store assignment keys, but only update DOM for current chunk
+            const [startIdx, startMi] = [cidx1, mi1];
+            const [endIdx, endMi] = [cidx2, mi2];
+            // iterate across affected chunks in numeric order
+            const idxStart = Math.min(startIdx, endIdx);
+            const idxEnd = Math.max(startIdx, endIdx);
+            for (let chunk = idxStart; chunk <= idxEnd; chunk++) {
+              // determine start/end message indexes for this chunk
+              const s = (chunk === startIdx) ? Math.min(startMi, endMi) : 0;
+              const e = (chunk === endIdx) ? Math.max(startMi, endMi) : 999999;
+              // we don't have DOM for other chunks; but we still persist assignments keyed by `${chunk}:${j}`
+              for (let j = s; j <= e; j++) {
+                const k = `${chunk}:${j}`;
+                groupAssignments.set(k, groupNum);
               }
             }
+            // update DOM only for active chunk messages inside range
+            // (already done above if same chunk)
+            if (state.chunkIndex >= idxStart && state.chunkIndex <= idxEnd) {
+              // try a re-render to pick up new assignments visually
+              renderChunk(state.data);
+            }
           }
-
           pendingDivider = null;
           updateBottomBar();
         }
@@ -243,7 +268,6 @@ function renderChunk(data) {
         ev.preventDefault();
         updateBottomBar();
       } else if (dividerMode && groupAssignments.has(key)) {
-        // remove divider assignment
         const groupNum = groupAssignments.get(key);
         groupAssignments.delete(key);
         el.style.borderLeft = "";
@@ -256,26 +280,48 @@ function renderChunk(data) {
     canvas.appendChild(el);
   });
 
+  // Show which JSON filename is loaded in console (helpful)
+  try {
+    const files = window.__lastJsonFilesList || null;
+    if (files && files[state.chunkIndex]) {
+      console.log("Loaded JSON:", files[state.chunkIndex]);
+    }
+  } catch (e) { /* ignore */ }
+
   updateBottomBar();
+}
+
+// --- helper: safe attachment ref (handles string or object attachments)
+function attachmentRef(att){
+  if(!att) return "";
+  if(typeof att === "string") return att;
+  // common object shapes: { id: "..."} or {url: "..."} or {file:"..."}
+  return att.id || att.url || att.file || "";
 }
 
 
 
 
+// updateBottomBar improved to show filename if available
 function updateBottomBar(){
   let text = 'No file loaded';
   if(state.loaded && state.data){
     const count = state.data.messageCount ?? state.data.messages.length;
     text = `Chunk ${state.chunkIndex} | messageCount: ${count}`;
+    // show group/mark modes
+    if(markMode) text += ' | markmode enabled';
+    if(dividerMode) text += ' | dividermode enabled';
+    if(pendingDivider) text += ' | pending divider: ' + pendingDivider;
+    // show currently loaded filename if backend provided list (saved on load)
+    if (window.__lastJsonFilesList && window.__lastJsonFilesList[state.chunkIndex]) {
+      text += ' | ' + window.__lastJsonFilesList[state.chunkIndex];
+    }
   }
-  if(markMode){
-    text += ' | markmode enabled';
-  }
-  if(dividerMode){
-    text += ' | dividermode enabled';
-  }
-
   setBottomBar(text);
+}
+
+function setLastJsonFilesList(list){
+  window.__lastJsonFilesList = list || null;
 }
 
 
@@ -294,6 +340,7 @@ async function doUploadFile(file){
   state.chunkIndex = data.chunk_index;
   state.fileCount = data.file_count || 0;
   state.data = data.data;
+  setLastJsonFilesList(data.json_files || null);
   renderChunk(state.data);
 }
 
@@ -306,6 +353,7 @@ async function navigate(direction){
   state.chunkIndex = j.chunk_index;
   state.fileCount = j.file_count || state.fileCount;
   state.data = j.data;
+  setLastJsonFilesList(j.json_files || null);
   renderChunk(state.data);
 }
 
@@ -317,6 +365,7 @@ async function reloadChunk(){
   state.chunkIndex = j.chunk_index;
   state.fileCount = j.file_count || state.fileCount;
   state.data = j.data;
+  setLastJsonFilesList(data.json_files || null);
   renderChunk(state.data);
 }
 
@@ -401,7 +450,6 @@ if (exportBtn) {
 
 
 function reloadImages(){
-  // Just bump a cachebust key and rerender to force image reload
   state.imagesReloadKey = Date.now();
   if(state.data) renderChunk(state.data);
 }
@@ -470,6 +518,7 @@ async function loadRecent(folder){
   state.loaded = true;
   state.chunkIndex = j.chunk_index;
   state.data = j.data;
+  setLastJsonFilesList(data.json_files || null);
   renderChunk(state.data);
 }
 
@@ -530,13 +579,16 @@ async function loadRecentSave(folder){
     alert(e.error||'Failed to load save');
     return;
   }
+
   const j = await res.json();
   state.loaded = true;
   state.chunkIndex = j.chunk_index;
   state.data = j.data;
   markedMessages.clear();  // reset marks when loading previous save
+  setLastJsonFilesList(j.json_files || null); // ✅ use j instead of data
   renderChunk(state.data);
 }
+
 
 // call once on startup
 refreshRecentSaveMenu();

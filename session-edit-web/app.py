@@ -6,7 +6,7 @@ import shutil
 import sqlite3
 import zipfile
 import re
-# from datetime import datetime
+from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, session, abort
 
 app = Flask(__name__)
@@ -25,72 +25,67 @@ logging.basicConfig(level=logging.INFO)
 def index():
     return render_template("index.html")
 
+
+@app.route('/favicon.ico')
+def favicon():
+    # return empty 204 so browser stops requesting
+    return '', 204
+
+
 def sort_json_files(files):
     # Sort by the first integer found in filename; if none, fall back to filename
     def keyfn(f):
         m = re.search(r'(\d+)', f)
         return (int(m.group(1)), f) if m else (float('inf'), f)
+
     return sorted(files, key=keyfn)
 
 
+# --- ensure upload returns json_files list
 @app.route("/upload", methods=["POST"])
 def upload():
     file = request.files.get("file")
     if not file or not file.filename.endswith(".zip"):
         return jsonify({"error": "Invalid file format"}), 400
-
     filepath = os.path.join(UPLOAD_FOLDER, file.filename)
     file.save(filepath)
-
     extract_path = os.path.join(EXTRACT_FOLDER, os.path.splitext(file.filename)[0])
     if os.path.exists(extract_path):
-        for root, dirs, files in os.walk(extract_path, topdown=False):
-            for name in files:
-                os.remove(os.path.join(root, name))
-            for name in dirs:
-                os.rmdir(os.path.join(root, name))
+        shutil.rmtree(extract_path)
     with zipfile.ZipFile(filepath, 'r') as z:
         z.extractall(extract_path)
-
     json_files = [f for f in os.listdir(extract_path) if f.endswith(".json")]
     json_files = sort_json_files(json_files)
     db_files = [f for f in os.listdir(extract_path) if f.endswith(".db")]
-
     if not json_files or "packed_images.db" not in db_files:
         return jsonify({"error": "Invalid archive: needs .json files and packed_images.db"}), 400
-
     session["json_files"] = json_files
     session["extract_path"] = extract_path
     session["current_index"] = 0
     session["file_count"] = len(json_files)
-
     data = load_chunk(0)
     return jsonify({
         "message": "File loaded",
         "chunk_index": 0,
         "file_count": len(json_files),
-        "data": data
+        "data": data,
+        "json_files": json_files  # <-- provide filenames to client
     })
 
 
+# --- update load_chunk to LOG the filename being loaded
 def load_chunk(idx):
     json_files = session.get("json_files", [])
     extract_path = session.get("extract_path")
     if not json_files or not extract_path:
         return None
-
-    # ensure index is in bounds
     idx = max(0, min(idx, len(json_files) - 1))
-
     path = os.path.join(extract_path, json_files[idx])
+    app.logger.info("Loading JSON file: %s", path)  # <<-- LOG the currently loaded filename
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-
-    # include message count for UI convenience
     data["messageCount"] = len(data.get("messages", []))
-
     return data
-
 
 
 @app.route("/get_chunk")
@@ -99,8 +94,8 @@ def get_chunk():
     data = load_chunk(idx)
     if not data:
         return jsonify({"error": "No file loaded"}), 400
-    return jsonify({"chunk_index": idx, "file_count": session.get("file_count", len(session.get("json_files", []))), "data": data})
-
+    return jsonify(
+        {"chunk_index": idx, "file_count": session.get("file_count", len(session.get("json_files", []))), "data": data})
 
 
 # Recents
@@ -235,34 +230,46 @@ def export_marked():
 def load_recent():
     folder = request.json.get("folder")
     use_save_folder = request.json.get("save_folder", False)
-
     base_folder = SAVE_FOLDER if use_save_folder else EXTRACT_FOLDER
     extract_path = os.path.join(base_folder, folder)
-
     if not os.path.exists(extract_path):
         return jsonify({"error": "Folder not found"}), 404
-
     json_files = [f for f in os.listdir(extract_path) if f.endswith(".json")]
     json_files = sort_json_files(json_files)
     db_files = [f for f in os.listdir(extract_path) if f.endswith(".db")]
     if not json_files or "packed_images.db" not in db_files:
         return jsonify({"error": "Invalid folder"}), 400
-
     session["json_files"] = json_files
     session["extract_path"] = extract_path
     session["current_index"] = 0
     session["file_count"] = len(json_files)
-
     data = load_chunk(0)
-    return jsonify({"message": "Recent loaded", "chunk_index": 0, "file_count": len(json_files), "data": data})
+    return jsonify({
+        "message": "Recent loaded",
+        "chunk_index": 0,
+        "file_count": len(json_files),
+        "data": data,
+        "json_files": json_files
+    })
 
 
 @app.route("/navigate", methods=["POST"])
 def navigate():
     direction = request.json.get("direction")
     json_files = session.get("json_files", [])
+
     if not json_files:
         return jsonify({"error": "No file loaded"}), 400
+
+    # Sort by the last number in the filename
+    def extract_index(filename):
+        match = re.findall(r"(\d+)", filename)
+        if not match:
+            return 0  # fallback if no number is found
+        return int(match[-1])  # take the last number
+
+    json_files = sorted(json_files, key=extract_index)
+    session["json_files"] = json_files
 
     idx = session.get("current_index", 0)
     if idx is None or idx < 0 or idx >= len(json_files):
@@ -281,8 +288,14 @@ def navigate():
 
     session["current_index"] = idx
     data = load_chunk(idx)
-    return jsonify({"chunk_index": idx, "file_count": len(json_files), "data": data})
+    logging.info(f"Navigating to index {idx}, file {json_files[idx]}")
 
+    return jsonify({
+        "chunk_index": idx,
+        "file_count": len(json_files),
+        "data": data,
+        "json_files": json_files
+    })
 
 
 @app.route('/attachment/<path:attachment_id>')
@@ -335,23 +348,53 @@ def attachment(file_id):
 
 @app.route("/save_marked", methods=["POST"])
 def save_marked():
-    marks = request.json.get("marks", {})
-    groups = request.json.get("groups", {})  # expected: { "assignments": { "0:3": {"id":1,"name":"A","color":"rgb(...)"} } }
-    group_assignments = groups.get("assignments", {})
-
+    marks = request.json.get("marks", {}) or {}
+    groups = request.json.get("groups", {}) or {}
+    group_assignments = groups.get("assignments", {}) or {}
     extract_path = session.get("extract_path")
     if not extract_path:
         return jsonify({"error": "No file loaded"}), 400
-
     save_path = os.path.join(SAVE_FOLDER, os.path.basename(extract_path))
     os.makedirs(save_path, exist_ok=True)
 
+    # determine which files are affected (either by marks or group assignments)
+    affected_indices = set()
+    for k in list(marks.keys()):
+        if ":" in k:
+            idx = int(k.split(":", 1)[0])
+            affected_indices.add(idx)
+    for k in list(group_assignments.keys()):
+        if ":" in k:
+            idx = int(k.split(":", 1)[0])
+            affected_indices.add(idx)
+
+    # if none affected then nothing to write, but still ensure DB copied
+    if not affected_indices:
+        db_src = os.path.join(extract_path, "packed_images.db")
+        if os.path.exists(db_src):
+            db_dst = os.path.join(save_path, "packed_images.db")
+            if os.path.abspath(db_src) != os.path.abspath(db_dst):
+                shutil.copyfile(db_src, db_dst)
+        return jsonify({"message": "Marked data saved (no JSON changes)"}), 200
+
+    # only rewrite the affected JSON files
     for idx, fname in enumerate(session["json_files"]):
+        if idx not in affected_indices:
+            # copy untouched file to save folder to keep archive coherent
+            src = os.path.join(extract_path, fname)
+            dst = os.path.join(save_path, fname)
+            # only copy if destination missing or source newer
+            try:
+                if not os.path.exists(dst) or os.path.getmtime(src) > os.path.getmtime(dst):
+                    shutil.copyfile(src, dst)
+            except Exception:
+                shutil.copyfile(src, dst)
+            continue
+
         src = os.path.join(extract_path, fname)
         dst = os.path.join(save_path, fname)
         with open(src, "r", encoding="utf-8") as f:
             data = json.load(f)
-
         for mi, msg in enumerate(data.get("messages", [])):
             key = f"{idx}:{mi}"
             # marks
@@ -359,11 +402,9 @@ def save_marked():
                 msg["marked"] = True
             else:
                 msg.pop("marked", None)
-
             # group assignments: store as object {id,name,color}
             if key in group_assignments:
                 ga = group_assignments[key]
-                # ensure id exists
                 gid = ga.get("id")
                 gname = ga.get("name") if "name" in ga else None
                 gcolor = ga.get("color") if "color" in ga else None
@@ -374,18 +415,18 @@ def save_marked():
                     msg["group"]["color"] = gcolor
             else:
                 msg.pop("group", None)
-
+        # write modified JSON
         with open(dst, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    # copy DB safely
+    # copy DB once
     db_src = os.path.join(extract_path, "packed_images.db")
     if os.path.exists(db_src):
         db_dst = os.path.join(save_path, "packed_images.db")
         if os.path.abspath(db_src) != os.path.abspath(db_dst):
-            shutil.copy(db_src, db_dst)
+            shutil.copyfile(db_src, db_dst)
 
-    return jsonify({"message": "Marked data saved"})
+    return jsonify({"message": "Marked data saved"}), 200
 
 
 @app.route("/export_save", methods=["POST"])
