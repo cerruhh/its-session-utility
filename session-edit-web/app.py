@@ -88,6 +88,7 @@ def load_chunk(idx):
 
     # include message count for UI convenience
     data["messageCount"] = len(data.get("messages", []))
+
     return data
 
 

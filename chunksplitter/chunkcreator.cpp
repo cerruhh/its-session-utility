@@ -51,12 +51,14 @@ void split_json_messages(const std::string& file_path, int chunk_size) {
         }
         chunk_data["messageCount"] = chunk_data["messages"].size();
 
-        std::string filename = base_name + "_part" + std::to_string(i + 1) + ".json";
+        // ✅ use i instead of (i+1) so filenames start at 0
+        std::string filename = base_name + "_part" + std::to_string(i) + ".json";
         fs::path output_file = chunk_dir / filename;
 
         std::ofstream out(output_file);
         out << chunk_data.dump(2);
     }
+
 
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end_time - start_time;
