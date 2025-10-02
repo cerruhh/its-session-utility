@@ -267,15 +267,24 @@ function renderChunk(data) {
         el.classList.remove("marked");
         ev.preventDefault();
         updateBottomBar();
+
       } else if (dividerMode && groupAssignments.has(key)) {
         const groupNum = groupAssignments.get(key);
+
+        // Remove divider assignment from this element
         groupAssignments.delete(key);
         el.style.borderLeft = "";
         el.removeAttribute("data-group");
         ev.preventDefault();
         updateBottomBar();
+
+        // Ask if the whole group should be removed
+        if (confirm(`Remove entire group "${groupNames[groupNum] || groupNum}"?`)) {
+          removeGroup(groupNum);   // calls the helper we added earlier
+        }
       }
     });
+
 
     canvas.appendChild(el);
   });
@@ -290,6 +299,53 @@ function renderChunk(data) {
 
   updateBottomBar();
 }
+
+function handleGroupOption(option) {
+  if (option === "Next group") {
+    navigateGroup(1);
+  } else if (option === "Back group") {
+    navigateGroup(-1);
+  } else if (option === "Search for group by name") {
+    const name = prompt("Enter group name:");
+    if (name) {
+      goToGroupByName(name.trim());
+    }
+  }
+}
+
+function navigateGroup(direction) {
+  if (!groups.length) return;
+  const current = state.chunkIndex;
+  let targetGroup = null;
+
+  if (direction > 0) {
+    targetGroup = groups.find(g => g.start > current);
+  } else {
+    const reversed = [...groups].reverse();
+    targetGroup = reversed.find(g => g.start < current);
+  }
+  if (targetGroup) {
+    state.chunkIndex = targetGroup.start;
+    renderChunk(state.data);
+  }
+}
+
+function goToGroupByName(name) {
+  const entry = Object.entries(groupNames).find(([id, n]) => n === name);
+  if (!entry) {
+    alert("Group not found: " + name);
+    return;
+  }
+  const groupId = entry[0];
+  const group = groups.find(g => g.group === parseInt(groupId));
+  if (group) {
+    state.chunkIndex = group.start;
+    renderChunk(state.data);
+  }
+}
+
+
+
 
 // --- helper: safe attachment ref (handles string or object attachments)
 function attachmentRef(att){
@@ -518,7 +574,7 @@ async function loadRecent(folder){
   state.loaded = true;
   state.chunkIndex = j.chunk_index;
   state.data = j.data;
-  setLastJsonFilesList(data.json_files || null);
+  setLastJsonFilesList(j.json_files || null);
   renderChunk(state.data);
 }
 
@@ -551,6 +607,57 @@ async function refreshRecentSaveMenu(){
   });
 }
 
+// Group menu actions
+document.getElementById('menu-group-next').addEventListener('click', () => {
+  navigateGroup(1);
+});
+
+document.getElementById('menu-group-back').addEventListener('click', () => {
+  navigateGroup(-1);
+});
+
+document.getElementById('menu-group-search').addEventListener('click', () => {
+  const name = prompt("Enter group name:");
+  if (name && name.trim() !== "") {
+    goToGroupByName(name.trim());
+  }
+});
+
+
+//// Add in your topbar creation code
+//const groupMenu = document.createElement("div");
+//groupMenu.className = "menu group-menu";
+//
+//const groupBtn = document.createElement("button");
+//groupBtn.textContent = "Group ▾";
+//
+//const menuList = document.createElement("ul");
+//["Next group", "Back group", "Search for group by name"].forEach(opt => {
+//  const li = document.createElement("li");
+//  li.textContent = opt;
+//  li.onclick = () => handleGroupOption(opt);
+//  menuList.appendChild(li);
+//});
+//
+//groupMenu.appendChild(groupBtn);
+//groupMenu.appendChild(menuList);
+//document.getElementById("topbar").appendChild(groupMenu);
+
+function handleGroupOption(option) {
+  if (option === "Next group") {
+    navigateGroup(1);
+  } else if (option === "Back group") {
+    navigateGroup(-1);
+  } else if (option === "Search for group by name") {
+    const name = prompt("Enter group name:");
+    if (name) {
+      goToGroupByName(name.trim());
+    }
+  }
+}
+
+
+
 function handleDividerClick(idx, mi) {
   const key = `${idx}:${mi}`;
   if (!pendingDivider) {
@@ -563,6 +670,13 @@ function handleDividerClick(idx, mi) {
     pendingDivider = null;
     renderChunk(state.data);
   }
+}
+
+function removeGroup(id) {
+  if (!groups) groups = []; // make sure it's defined
+  groups = groups.filter(g => g.group !== id);
+  if (groupNames) delete groupNames[id];
+  renderChunk(state.data);
 }
 
 
